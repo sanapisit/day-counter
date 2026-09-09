@@ -1,0 +1,23 @@
+services:
+  app:
+    container_name: day-counter
+    image: day-counter:latest
+
+    ports:
+      - "3000:3000"
+
+    environment:
+      - PERSON_NAME_1=Person1
+      - PERSON_BIRTHDAY_1=2026-03-01
+      - PERSON_NAME_2=Person1
+      - PERSON_BIRTHDAY_2=2026-03-01
+      - ANNIVERSARY=2026-03-01
+
+    volumes:
+      - ./template:/app/assets/images:ro
+
+    # RPi 3B+ has 1GB total RAM shared with the OS; keep this contained
+    mem_limit: 256m
+    cpus: "2.0"
+
+    restart: unless-stopped
