@@ -8,10 +8,10 @@ services:
 
     environment:
       - PERSON_NAME_1=Person1
-      - PERSON_BIRTHDAY_1=2026-03-01
+      - PERSON_BIRTHDAY_1=01/03/2569
       - PERSON_NAME_2=Person1
-      - PERSON_BIRTHDAY_2=2026-03-01
-      - ANNIVERSARY=2026-03-01
+      - PERSON_BIRTHDAY_2=01/03/2569
+      - ANNIVERSARY=01/03/2569
 
     volumes:
       - ./template:/app/assets/images:ro

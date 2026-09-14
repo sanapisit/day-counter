@@ -1,11 +1,17 @@
-import { Temporal } from "@js-temporal/polyfill";
 import { createCanvas, type Canvas } from "@napi-rs/canvas";
 import { AppConstants } from "../constants/app";
 import { HeaderConstants } from "../constants/headers";
-import { RegexConstants } from "../constants/regex";
-import { TZConstants } from "../constants/tz";
 import { Config } from "../preload";
 import { getTemplate } from "../preload/template";
+import {
+  diffDays,
+  diffYearsMonthsDays,
+  getToday,
+  nextMidnightMs,
+  nextYearlyOccurrence,
+  parseEnvDate,
+  parseIsoDate,
+} from "../utils/date";
 import { Logs } from "../utils/log";
 
 export const dayCounter = async (
@@ -30,33 +36,93 @@ export const dayCounter = async (
     return new Response("Unsupported size", { status: 400 });
   }
 
-  // Timeout canvas generation after 30s — prevent hung requests
-  const timeoutMs = 30_000;
-  const buffer = await Promise.race([
-    getCanvas(w, h),
-    new Promise<never>((_, reject) =>
-      setTimeout(
-        () => reject(new Error("Canvas generation timed out")),
-        timeoutMs,
-      ),
-    ),
-  ]);
+  // Timeout canvas generation — prevent hung requests. หมายเหตุ: race ไม่ได้
+  // ยกเลิกงานที่ค้างอยู่ แต่ entry ยังอยู่ใน cache ต่อ request ถัดไปจึงได้ผลลัพธ์เดิม
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const buffer = await Promise.race([
+      getCanvas(w, h),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("Canvas generation timed out")),
+          AppConstants.RENDER_TIMEOUT_MS,
+        );
+      }),
+    ]);
 
-  return new Response(buffer as BodyInit, {
-    headers: HeaderConstants.IMAGE_HEADERS,
-  });
+    return new Response(buffer as BodyInit, { headers: imageHeaders() });
+  } finally {
+    // ไม่เคลียร์ = ทุก request ทิ้ง timer ค้าง event loop ไว้ 30 วินาที
+    clearTimeout(timer);
+  }
 };
 
+// เที่ยงคืนถัดไป (epoch ms) — คำนวณวันละครั้งแล้ว cache ไว้
+let cachedMidnightMs = 0;
+const getNextMidnightMs = (): number => {
+  if (Date.now() >= cachedMidnightMs) {
+    cachedMidnightMs = nextMidnightMs();
+  }
+
+  return cachedMidnightMs;
+};
+
+// อย่าให้ cache ฝั่ง client ข้ามเที่ยงคืน ไม่งั้น widget จะค้างภาพของเมื่อวาน
+const imageHeaders = () => {
+  const secondsLeft = Math.ceil((getNextMidnightMs() - Date.now()) / 1000);
+  const maxAge = Math.max(
+    1,
+    Math.min(AppConstants.IMAGE_MAX_AGE_SECONDS, secondsLeft),
+  );
+
+  return {
+    "Content-Type": HeaderConstants.IMAGE_CONTENT_TYPE,
+    "Cache-Control": `public, max-age=${maxAge}`,
+  };
+};
+
+// ---------------------------------------------------------------------------
+// จำกัดจำนวน render ที่วิ่งพร้อมกัน
+// ---------------------------------------------------------------------------
+// บน Pi ที่มี 2 CPU การปล่อยให้ทุกขนาด render พร้อมกันทำให้ทุกอันช้าลงพร้อมกัน
+// จนชน timeout และยังทำให้ peak memory พุ่งเกิน mem_limit 256m
+let activeRenders = 0;
+const renderWaiters: Array<() => void> = [];
+
+const acquireRenderSlot = (): Promise<void> => {
+  if (activeRenders < AppConstants.MAX_CONCURRENT_RENDERS) {
+    activeRenders++;
+    return Promise.resolve();
+  }
+
+  return new Promise<void>((resolve) => renderWaiters.push(resolve));
+};
+
+const releaseRenderSlot = () => {
+  const next = renderWaiters.shift();
+  // ส่งต่อ slot ให้คิวถัดไปโดยไม่ลด activeRenders
+  if (next) next();
+  else activeRenders--;
+};
+
+// ---------------------------------------------------------------------------
+// Cache + pre-warm
+// ---------------------------------------------------------------------------
 const cachedCanvas: Map<string, Promise<Buffer<ArrayBufferLike>>> = new Map();
 let lastGenCanvas: string;
 
+// ขนาดที่เคยถูกขอ — เก็บข้ามวันเพื่อใช้ pre-warm ตอนเที่ยงคืน
+const hotSizes: Map<string, { w: number; h: number }> = new Map();
+
 export const clearCanvasCache = () => {
   cachedCanvas.clear();
+  // template เพิ่งเปลี่ยน: อุ่น cache ใหม่แบบเบื้องหลัง จะได้ไม่ผลักภาระ
+  // การ render ไปให้ request แรกที่เข้ามา
+  scheduleWarm();
 };
+
 const getCanvas = (w: number, h: number) => {
-  const today = Temporal.Now.zonedDateTimeISO(TZConstants.TH)
-    .toPlainDate()
-    .toString();
+  const today = getToday();
 
   if (lastGenCanvas !== today) {
     lastGenCanvas = today;
@@ -64,6 +130,16 @@ const getCanvas = (w: number, h: number) => {
   }
 
   const key = `${w}x${h}`;
+
+  // จำขนาดไว้ก่อน แม้จะ hit cache ก็ตาม เพื่อให้ pre-warm รู้ว่าต้องอุ่นอะไรบ้าง
+  if (!hotSizes.has(key)) {
+    if (hotSizes.size >= AppConstants.MAX_CACHED_IMAGES) {
+      const oldest = hotSizes.keys().next().value;
+      if (oldest !== undefined) hotSizes.delete(oldest);
+    }
+    hotSizes.set(key, { w, h });
+  }
+
   const cached = cachedCanvas.get(key);
   if (cached) return cached;
 
@@ -75,13 +151,99 @@ const getCanvas = (w: number, h: number) => {
 
   // store the promise synchronously so concurrent requests for the same size
   // await the same in-flight generation instead of each triggering their own
-  const pending = genCanvas(w, h, today).catch((err) => {
+  const pending = renderWithSlot(w, h, today).catch((err) => {
     cachedCanvas.delete(key);
     throw err;
   });
   cachedCanvas.set(key, pending);
 
   return pending;
+};
+
+const renderWithSlot = async (w: number, h: number, today: string) => {
+  await acquireRenderSlot();
+  try {
+    return await genCanvas(w, h, today);
+  } finally {
+    releaseRenderSlot();
+  }
+};
+
+// อุ่น cache ทีละขนาด (ไม่ขนาน) — ให้ request จริงแทรกเข้ามาใช้ slot ได้
+let warming: Promise<void> | null = null;
+
+const warmCache = async () => {
+  for (const { w, h } of [...hotSizes.values()]) {
+    try {
+      await getCanvas(w, h);
+    } catch (err) {
+      Logs.log(`warm ${w}x${h} failed: ${(err as Error).message}`);
+    }
+  }
+};
+
+const runWarm = (): Promise<void> => {
+  if (warming) return warming;
+
+  warming = warmCache().finally(() => {
+    warming = null;
+  });
+
+  return warming;
+};
+
+let warmTimer: ReturnType<typeof setTimeout> | null = null;
+
+const scheduleWarm = () => {
+  if (hotSizes.size === 0) return;
+
+  // debounce: clearCanvasCache() อาจถูกเรียกรัวๆ (fs.watch ยิงซ้ำ) ถ้าอุ่นทันที
+  // ภาพที่เพิ่งอุ่นเสร็จจะโดน clear รอบถัดไปล้างทิ้ง กลายเป็น render ฟรี
+  if (warmTimer) clearTimeout(warmTimer);
+  warmTimer = setTimeout(() => {
+    warmTimer = null;
+    void runWarm();
+  }, AppConstants.WARM_DEBOUNCE_MS);
+  warmTimer.unref();
+};
+
+// ---------------------------------------------------------------------------
+// Rollover: render ภาพของวันใหม่ล่วงหน้า ไม่ใช่รอให้ request แรกเป็นคนจ่าย
+// ---------------------------------------------------------------------------
+let rolloverTimer: ReturnType<typeof setTimeout> | null = null;
+
+const scheduleRollover = () => {
+  if (rolloverTimer) clearTimeout(rolloverTimer);
+
+  const delay =
+    getNextMidnightMs() - Date.now() + AppConstants.ROLLOVER_GRACE_MS;
+
+  rolloverTimer = setTimeout(() => {
+    // ตั้งรอบถัดไปก่อนเสมอ เพื่อไม่ให้ error ระหว่างอุ่น cache ทำให้ลูปขาด
+    scheduleRollover();
+    Logs.log("date rollover: warming cache");
+    void runWarm();
+  }, Math.max(1, delay));
+
+  // อย่าให้ timer กันไม่ให้ process ปิดตัวตอน shutdown
+  rolloverTimer.unref();
+
+  Logs.log(`next rollover warm in ${Math.round(delay / 1000)}s`);
+};
+
+// เรียกจาก index.ts หลัง server ขึ้นแล้ว
+export const warmup = async () => {
+  try {
+    // โหลด template ก่อน: การโหลดครั้งแรกจะเรียก clearCanvasCache() ซึ่งเดิมไป
+    // ล้าง entry ของ request แรกที่กำลัง render อยู่ ทำให้ภาพแรกไม่เคยถูก cache
+    await getTemplate();
+    await getCanvas(Config.DEFAULT_WIDTH, Config.DEFAULT_HEIGHT);
+    Logs.log("warmup done");
+  } catch (err) {
+    Logs.log("warmup failed: " + (err as Error).message);
+  } finally {
+    scheduleRollover();
+  }
 };
 
 const genCanvas = async (w: number, h: number, today: string) => {
@@ -284,89 +446,32 @@ const genText = (today: string) => {
     `Anniversary - ${anniversary.countdownDays}`,
   ];
 };
-
 const calculate = (input: string, todayStr?: string) => {
-  // validate format YYYY-MM-DD
-  if (!RegexConstants.DATE.test(input)) {
-    return {
-      passed: "Invalid date",
-      countdownDays: "Invalid date",
-    };
-  }
+  const invalid = {
+    passed: "Invalid date",
+    countdownDays: "Invalid date",
+  };
 
-  let baseDate: Temporal.PlainDate;
-  try {
-    baseDate = Temporal.PlainDate.from(input);
-  } catch {
-    return {
-      passed: "Invalid date",
-      countdownDays: "Invalid date",
-    };
-  }
+  // env เก็บเป็น DD/MM/YYYY ปี พ.ศ. — parseEnvDate เช็คทั้งรูปแบบและความมีอยู่จริง
+  const baseDate = parseEnvDate(input);
+  if (!baseDate) return invalid;
 
-  let today: Temporal.PlainDate;
-  try {
-    today = todayStr
-      ? Temporal.PlainDate.from(todayStr)
-      : Temporal.Now.zonedDateTimeISO(TZConstants.TH).toPlainDate();
-  } catch {
-    return {
-      passed: "Invalid date",
-      countdownDays: "Invalid date",
-    };
-  }
+  const today = todayStr ? parseIsoDate(todayStr) : parseIsoDate(getToday());
+  if (!today) return invalid;
 
-  const cmp = Temporal.PlainDate.compare(today, baseDate);
-  const isPast = cmp >= 0;
+  const isPast = !today.isBefore(baseDate);
 
   // ===== 1) เวลาที่ผ่านมา =====
-  let diffYMD: { years: number; months: number; days: number };
-  let totalDays = 0;
-  try {
-    diffYMD = isPast
-      ? baseDate.until(today, { largestUnit: "years" })
-      : today.until(baseDate, { largestUnit: "years" });
-    totalDays = isPast
-      ? baseDate.until(today, { largestUnit: "days" }).days
-      : 0;
-  } catch {
-    return {
-      passed: "Error",
-      countdownDays: "Error",
-    };
-  }
+  const elapsed = isPast
+    ? diffYearsMonthsDays(baseDate, today)
+    : diffYearsMonthsDays(today, baseDate);
+  const totalDays = isPast ? diffDays(baseDate, today) : 0;
 
   // ===== 2) Countdown แบบวนรายปี =====
-  let nextOccurrence: Temporal.PlainDate;
+  const nextOccurrence = nextYearlyOccurrence(baseDate, today);
 
-  try {
-    nextOccurrence = baseDate.with({ year: today.year });
-  } catch {
-    // handle leap year เช่น 29 Feb
-    nextOccurrence = Temporal.PlainDate.from({
-      year: today.year,
-      month: baseDate.month,
-      day: 28,
-    });
-  }
-
-  try {
-    if (Temporal.PlainDate.compare(today, nextOccurrence) > 0) {
-      nextOccurrence = nextOccurrence.add({ years: 1 });
-    }
-
-    const countdownDays = today.until(nextOccurrence, {
-      largestUnit: "days",
-    }).days;
-
-    return {
-      passed: `${diffYMD.years}y${diffYMD.months}m${diffYMD.days}d | ${totalDays}d`,
-      countdownDays: `${countdownDays}d`,
-    };
-  } catch {
-    return {
-      passed: `${diffYMD.years}y${diffYMD.months}m${diffYMD.days}d | ${totalDays}d`,
-      countdownDays: "Error",
-    };
-  }
+  return {
+    passed: `${elapsed.years}y${elapsed.months}m${elapsed.days}d | ${totalDays}d`,
+    countdownDays: `${diffDays(today, nextOccurrence)}d`,
+  };
 };

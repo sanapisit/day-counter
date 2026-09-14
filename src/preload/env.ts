@@ -1,4 +1,4 @@
-import { RegexConstants } from "../constants/regex";
+import { parseEnvDate } from "../utils/date";
 
 export enum NodeEnv {
   development = "development",
@@ -33,10 +33,10 @@ export const loadEnv = (): Env => {
     DEFAULT_WIDTH = "1179",
 
     PERSON_NAME_1 = "Person1",
-    PERSON_BIRTHDAY_1 = "2026-03-01",
+    PERSON_BIRTHDAY_1 = "01/03/2569",
     PERSON_NAME_2 = "Person2",
-    PERSON_BIRTHDAY_2 = "2026-03-01",
-    ANNIVERSARY = "2026-03-01",
+    PERSON_BIRTHDAY_2 = "01/03/2569",
+    ANNIVERSARY = "01/03/2569",
   } = process.env;
 
   const nodeEnv = NODE_ENV as NodeEnv;
@@ -83,16 +83,21 @@ export const loadEnv = (): Env => {
     throw new Error("Invalid PERSON_NAME_2");
   }
 
-  if (!RegexConstants.DATE.test(PERSON_BIRTHDAY_1)) {
-    throw new Error("Invalid PERSON_BIRTHDAY_1");
+  // DD/MM/YYYY ปี พ.ศ. — parseEnvDate เช็คทั้งรูปแบบ, ความมีอยู่จริงของวันที่
+  // (31/02/2569 ไม่ผ่าน) และช่วงปี พ.ศ. ที่สมเหตุสมผล จึงดักตั้งแต่ตอน boot
+  // แทนที่จะปล่อยไปโผล่เป็น "Invalid date" บนภาพ
+  const dateHint = "expected DD/MM/YYYY in Buddhist year, e.g. 01/03/2569";
+
+  if (!parseEnvDate(PERSON_BIRTHDAY_1)) {
+    throw new Error(`Invalid PERSON_BIRTHDAY_1 (${dateHint})`);
   }
 
-  if (!RegexConstants.DATE.test(PERSON_BIRTHDAY_2)) {
-    throw new Error("Invalid PERSON_BIRTHDAY_2");
+  if (!parseEnvDate(PERSON_BIRTHDAY_2)) {
+    throw new Error(`Invalid PERSON_BIRTHDAY_2 (${dateHint})`);
   }
 
-  if (!RegexConstants.DATE.test(ANNIVERSARY)) {
-    throw new Error("Invalid ANNIVERSARY");
+  if (!parseEnvDate(ANNIVERSARY)) {
+    throw new Error(`Invalid ANNIVERSARY (${dateHint})`);
   }
 
   return {
