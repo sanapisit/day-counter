@@ -28,14 +28,13 @@ export const parseEnvDate = (input: string): PlainDate | null => {
   const matched = RegexConstants.DATE.exec(input);
   if (!matched) return null;
 
-  const day = matched[1];
-  const month = matched[2];
-  const buddhistYear = Number(matched[3]);
-
-  if (day === undefined || month === undefined) return null;
-  if (!Number.isInteger(buddhistYear)) return null;
+  const [, day, month, year] = matched;
+  if (day === undefined || month === undefined || year === undefined) {
+    return null;
+  }
 
   // ดักกรณีกรอกปี ค.ศ. มา ไม่งั้น 2026 จะกลายเป็น ค.ศ. 1483 แบบเงียบๆ
+  const buddhistYear = Number(year);
   if (
     buddhistYear < CalendarConstants.MIN_BUDDHIST_YEAR ||
     buddhistYear > CalendarConstants.MAX_BUDDHIST_YEAR
@@ -86,10 +85,8 @@ export const nextYearlyOccurrence = (
   base: PlainDate,
   today: PlainDate,
 ): PlainDate => {
-  const occurrence = (year: number) => base.year(year);
-
-  const thisYear = occurrence(today.year());
-  return today.isAfter(thisYear) ? occurrence(today.year() + 1) : thisYear;
+  const thisYear = base.year(today.year());
+  return today.isAfter(thisYear) ? base.year(today.year() + 1) : thisYear;
 };
 
 // ---------------------------------------------------------------------------
@@ -99,8 +96,14 @@ export const nextYearlyOccurrence = (
 export const getToday = (): string =>
   dayjs().utcOffset(TZConstants.TH_UTC_OFFSET_MINUTES).format(ISO_FORMAT);
 
-// เที่ยงคืนไทยถัดไปเป็น epoch ms — เรียกวันละครั้ง
-export const nextMidnightMs = (): number => {
-  const today = dayjs.utc(getToday(), ISO_FORMAT, true);
-  return today.add(1, "day").valueOf() - OFFSET_MS;
+// เที่ยงคืนไทยถัดไปเป็น epoch ms — คิดใหม่แค่วันละครั้งแล้ว cache ผลไว้
+let cachedMidnightMs = 0;
+
+export const getNextMidnightMs = (): number => {
+  if (Date.now() >= cachedMidnightMs) {
+    const today = dayjs.utc(getToday(), ISO_FORMAT, true);
+    cachedMidnightMs = today.add(1, "day").valueOf() - OFFSET_MS;
+  }
+
+  return cachedMidnightMs;
 };

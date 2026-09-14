@@ -4,8 +4,9 @@ export const AppConstants = {
   FONT_PATH: "assets/fonts/Prompt-Bold.ttf",
   FONT_NAME: "Prompt",
 
-  HEIGHT: "height",
-  WIDTH: "width",
+  // ชื่อ query param ของ /day-counter
+  QUERY_WIDTH: "width",
+  QUERY_HEIGHT: "height",
 
   MIN_WIDTH: 1,
   MIN_HEIGHT: 1,
@@ -20,6 +21,9 @@ export const AppConstants = {
   // (the expensive half of a render) runs on the libuv threadpool — so letting
   // every distinct size render at once just thrashes CPU and memory.
   MAX_CONCURRENT_RENDERS: 2,
+
+  // คุณภาพ WebP — ลดต่ำกว่านี้แทบไม่ช่วยเรื่องเวลา encode (q50 เร็วขึ้นแค่ ~13%)
+  WEBP_QUALITY: 85,
 
   // ยอมให้ render นานสุดเท่านี้ก่อนตอบ error
   RENDER_TIMEOUT_MS: 30_000,
@@ -36,4 +40,7 @@ export const AppConstants = {
 
   // อายุ cache ฝั่ง client (วินาที) — จะถูกหั่นไม่ให้ข้ามเที่ยงคืน
   IMAGE_MAX_AGE_SECONDS: 300,
+
+  // รอให้ request ที่ค้างอยู่ทำงานจบก่อนปิด process
+  SHUTDOWN_DRAIN_MS: 5_000,
 } as const;

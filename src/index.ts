@@ -1,6 +1,7 @@
+import { AppConstants } from "./constants/app";
 import { Config } from "./preload";
 import { createServer } from "./server";
-import { warmup } from "./services/day-counter";
+import { warmup } from "./services/image-cache";
 import { Logs } from "./utils/log";
 
 const server = createServer();
@@ -12,13 +13,17 @@ Logs.log(
 // อุ่น cache เบื้องหลัง: /health ต้องตอบได้ทันทีโดยไม่รอ render ภาพแรก
 void warmup();
 
+let shuttingDown = false;
+
 const shutdown = async () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
   Logs.log("Shutting down...");
   server.stop(false);
-  // Wait up to 5s for pending requests to drain
-  await new Promise<void>((resolve) => {
-    setTimeout(() => resolve(), 5000);
-  });
+
+  // รอ request ที่ค้างอยู่ทำงานจบก่อน
+  await Bun.sleep(AppConstants.SHUTDOWN_DRAIN_MS);
   process.exit(0);
 };
 

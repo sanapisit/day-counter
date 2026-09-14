@@ -1,7 +1,7 @@
 import { Image, loadImage } from "@napi-rs/canvas";
 import { watch } from "node:fs";
 import { AppConstants } from "../constants/app";
-import { clearCanvasCache } from "../services/day-counter";
+import { createDebouncedTask } from "../utils/async";
 import { Logs } from "../utils/log";
 
 let cachedImage: Image | null = null;
@@ -10,56 +10,56 @@ let cachedImage: Image | null = null;
 // independently loading the template during initial load or reload.
 let loading: Promise<Image> | null = null;
 
+// ผู้ที่ถือ cache ที่อิงกับ template (เช่น image cache) มาสมัครรับแจ้งเตือนได้
+// เพื่อล้างของเก่าทิ้งเมื่อไฟล์ถูกเขียนทับ — โมดูลนี้จึงไม่ต้องรู้จักใครเลย
+const reloadListeners = new Set<() => void>();
+
+export const onTemplateReload = (listener: () => void) => {
+  reloadListeners.add(listener);
+};
+
 const loadTemplate = async (): Promise<Image> => {
   Logs.log("load Template");
 
   const bytes = await Bun.file(AppConstants.TEMPLATE_PATH).bytes();
   cachedImage = await loadImage(bytes);
 
-  clearCanvasCache();
-  Logs.log("clear canvas cache");
+  for (const listener of reloadListeners) listener();
+
   return cachedImage;
 };
 
-export const getTemplate = async (): Promise<Image> => {
-  if (cachedImage) return cachedImage;
-
-  // If a load is already in progress, await it instead of starting another
-  if (loading) return loading;
-
-  loading = loadTemplate().finally(() => {
+// โหลดผ่าน guard เสมอ เพื่อให้ผู้เรียกที่มาพร้อมกันใช้ผลลัพธ์เดียวกัน
+const load = (): Promise<Image> => {
+  loading ??= loadTemplate().finally(() => {
     loading = null;
   });
+
   return loading;
 };
 
+export const getTemplate = async (): Promise<Image> => cachedImage ?? load();
+
 const reload = async () => {
   try {
-    // Reuse the dedup guard so concurrent requests don't reload too
+    // ปล่อยให้รอบที่ค้างอยู่จบก่อน แล้วค่อยโหลดทับด้วยไฟล์ใหม่
     if (loading) await loading;
-    loading = loadTemplate().finally(() => {
-      loading = null;
-    });
-    await loading;
+    await load();
   } catch (err) {
-    loading = null;
-    console.error("Template reload failed:", err);
+    Logs.log(`Template reload failed: ${(err as Error).message}`);
   }
 };
 
 // fs.watch ยิง event หลายครั้งต่อการเขียนไฟล์ครั้งเดียว (ทั้งบน Linux และ Windows)
 // ถ้า reload ทุก event ภาพที่ warm cache เพิ่งสร้างเสร็จจะโดนล้างทิ้งซ้ำๆ
-let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+const scheduleReload = createDebouncedTask(
+  AppConstants.TEMPLATE_RELOAD_DEBOUNCE_MS,
+  () => void reload(),
+);
 
 watch(AppConstants.TEMPLATE_PATH, (event) => {
   if (event !== "change" && event !== "rename") return;
 
   Logs.log("Template changed: %s", event);
-
-  if (reloadTimer) clearTimeout(reloadTimer);
-  reloadTimer = setTimeout(() => {
-    reloadTimer = null;
-    void reload();
-  }, AppConstants.TEMPLATE_RELOAD_DEBOUNCE_MS);
-  reloadTimer.unref();
+  scheduleReload();
 });
