@@ -14,4 +14,7 @@ export const AppConstants = {
 
   // caps distinct w x h combos held in memory at once; RPi 3B+ only has 1GB RAM
   MAX_CACHED_IMAGES: 8,
+
+  // fs.watch ยิง event หลายครั้งต่อการเขียนไฟล์ครั้งเดียว — รวบให้เหลือ reload เดียว
+  TEMPLATE_RELOAD_DEBOUNCE_MS: 200,
 } as const;

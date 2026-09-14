@@ -33,19 +33,33 @@ export const getTemplate = async (): Promise<Image> => {
   return loading;
 };
 
-watch(AppConstants.TEMPLATE_PATH, async (event) => {
-  if (event === "change" || event === "rename") {
-    try {
-      Logs.log("Template changed: %s", event);
-      // Reuse the dedup guard so concurrent requests don't reload too
-      if (loading) await loading;
-      loading = loadTemplate().finally(() => {
-        loading = null;
-      });
-      await loading;
-    } catch (err) {
+const reload = async () => {
+  try {
+    // Reuse the dedup guard so concurrent requests don't reload too
+    if (loading) await loading;
+    loading = loadTemplate().finally(() => {
       loading = null;
-      console.error("Template reload failed:", err);
-    }
+    });
+    await loading;
+  } catch (err) {
+    loading = null;
+    console.error("Template reload failed:", err);
   }
+};
+
+// fs.watch ยิง event หลายครั้งต่อการเขียนไฟล์ครั้งเดียว (ทั้งบน Linux และ Windows)
+// ถ้า reload ทุก event ภาพที่ warm cache เพิ่งสร้างเสร็จจะโดนล้างทิ้งซ้ำๆ
+let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+
+watch(AppConstants.TEMPLATE_PATH, (event) => {
+  if (event !== "change" && event !== "rename") return;
+
+  Logs.log("Template changed: %s", event);
+
+  if (reloadTimer) clearTimeout(reloadTimer);
+  reloadTimer = setTimeout(() => {
+    reloadTimer = null;
+    void reload();
+  }, AppConstants.TEMPLATE_RELOAD_DEBOUNCE_MS);
+  reloadTimer.unref();
 });
