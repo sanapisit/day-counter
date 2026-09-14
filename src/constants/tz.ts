@@ -8,12 +8,9 @@ export const TZConstants = {
 
 export const LocaleConstants = {
   TH: "th-TH",
-};
+} as const;
 
 export const CalendarConstants = {
-  // รูปแบบวันที่ใน env (ปี พ.ศ.) เช่น 01/03/2569
-  ENV_DATE_FORMAT: "DD/MM/YYYY",
-
   // พ.ศ. = ค.ศ. + 543
   BUDDHIST_YEAR_OFFSET: 543,
 
