@@ -22,6 +22,44 @@ export type Env = {
   ANNIVERSARY: string;
 };
 
+const MAX_NAME_LENGTH = 30;
+
+// DD/MM/YYYY ปี พ.ศ. — parseEnvDate เช็คทั้งรูปแบบ, ความมีอยู่จริงของวันที่
+// (31/02/2569 ไม่ผ่าน) และช่วงปี พ.ศ. ที่สมเหตุสมผล จึงดักได้ตั้งแต่ตอน boot
+// แทนที่จะปล่อยไปโผล่เป็น "Invalid date" บนภาพ
+const DATE_HINT = "expected DD/MM/YYYY in Buddhist year, e.g. 01/03/2569";
+
+const invalid = (name: string, hint?: string) =>
+  new Error(hint ? `Invalid ${name} (${hint})` : `Invalid ${name}`);
+
+const requireInteger = (name: string, value: string): number => {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed)) throw invalid(name);
+
+  return parsed;
+};
+
+const requirePort = (name: string, value: string): number => {
+  const port = requireInteger(name, value);
+  if (port <= 0 || port > 65535) throw invalid(name);
+
+  return port;
+};
+
+const requireName = (name: string, value: string): string => {
+  if (value.trim().length === 0 || value.length > MAX_NAME_LENGTH) {
+    throw invalid(name);
+  }
+
+  return value;
+};
+
+const requireDate = (name: string, value: string): string => {
+  if (!parseEnvDate(value)) throw invalid(name, DATE_HINT);
+
+  return value;
+};
+
 export const loadEnv = (): Env => {
   const {
     NODE_ENV = NodeEnv.development,
@@ -40,79 +78,22 @@ export const loadEnv = (): Env => {
   } = process.env;
 
   const nodeEnv = NODE_ENV as NodeEnv;
-  if (!Object.values(NodeEnv).includes(nodeEnv)) {
-    throw new Error("Invalid NODE_ENV");
-  }
-
-  if (!HOST) {
-    throw new Error("Invalid HOST");
-  }
-
-  const port = Number(PORT);
-  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-    throw new Error("Invalid PORT");
-  }
-
-  const fontSize = Number(FONT_SIZE);
-  if (!Number.isInteger(fontSize)) {
-    throw new TypeError("Invalid FONT_SIZE");
-  }
-
-  const defaultHeight = Number(DEFAULT_HEIGHT);
-  if (!Number.isInteger(defaultHeight)) {
-    throw new TypeError("Invalid DEFAULT_HEIGHT");
-  }
-
-  const defaultWidth = Number(DEFAULT_WIDTH);
-  if (!Number.isInteger(defaultWidth)) {
-    throw new TypeError("Invalid DEFAULT_WIDTH");
-  }
-
-  const maxNameLength = 30;
-  if (
-    typeof PERSON_NAME_1 === "string" &&
-    (PERSON_NAME_1.trim().length === 0 || PERSON_NAME_1.length > maxNameLength)
-  ) {
-    throw new Error("Invalid PERSON_NAME_1");
-  }
-
-  if (
-    typeof PERSON_NAME_2 === "string" &&
-    (PERSON_NAME_2.trim().length === 0 || PERSON_NAME_2.length > maxNameLength)
-  ) {
-    throw new Error("Invalid PERSON_NAME_2");
-  }
-
-  // DD/MM/YYYY ปี พ.ศ. — parseEnvDate เช็คทั้งรูปแบบ, ความมีอยู่จริงของวันที่
-  // (31/02/2569 ไม่ผ่าน) และช่วงปี พ.ศ. ที่สมเหตุสมผล จึงดักตั้งแต่ตอน boot
-  // แทนที่จะปล่อยไปโผล่เป็น "Invalid date" บนภาพ
-  const dateHint = "expected DD/MM/YYYY in Buddhist year, e.g. 01/03/2569";
-
-  if (!parseEnvDate(PERSON_BIRTHDAY_1)) {
-    throw new Error(`Invalid PERSON_BIRTHDAY_1 (${dateHint})`);
-  }
-
-  if (!parseEnvDate(PERSON_BIRTHDAY_2)) {
-    throw new Error(`Invalid PERSON_BIRTHDAY_2 (${dateHint})`);
-  }
-
-  if (!parseEnvDate(ANNIVERSARY)) {
-    throw new Error(`Invalid ANNIVERSARY (${dateHint})`);
-  }
+  if (!Object.values(NodeEnv).includes(nodeEnv)) throw invalid("NODE_ENV");
+  if (!HOST) throw invalid("HOST");
 
   return {
     NODE_ENV: nodeEnv,
     HOST,
-    PORT: port,
+    PORT: requirePort("PORT", PORT),
 
-    FONT_SIZE: fontSize,
-    DEFAULT_HEIGHT: defaultHeight,
-    DEFAULT_WIDTH: defaultWidth,
+    FONT_SIZE: requireInteger("FONT_SIZE", FONT_SIZE),
+    DEFAULT_HEIGHT: requireInteger("DEFAULT_HEIGHT", DEFAULT_HEIGHT),
+    DEFAULT_WIDTH: requireInteger("DEFAULT_WIDTH", DEFAULT_WIDTH),
 
-    PERSON_NAME_1,
-    PERSON_BIRTHDAY_1,
-    PERSON_NAME_2,
-    PERSON_BIRTHDAY_2,
-    ANNIVERSARY,
+    PERSON_NAME_1: requireName("PERSON_NAME_1", PERSON_NAME_1),
+    PERSON_BIRTHDAY_1: requireDate("PERSON_BIRTHDAY_1", PERSON_BIRTHDAY_1),
+    PERSON_NAME_2: requireName("PERSON_NAME_2", PERSON_NAME_2),
+    PERSON_BIRTHDAY_2: requireDate("PERSON_BIRTHDAY_2", PERSON_BIRTHDAY_2),
+    ANNIVERSARY: requireDate("ANNIVERSARY", ANNIVERSARY),
   };
 };
