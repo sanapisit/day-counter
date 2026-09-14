@@ -22,7 +22,7 @@ Generates an image from a template and renders dynamic text (daycounter) on top.
 - Bun
 - Express 5
 - @napi-rs/canvas (Skia)
-- @js-temporal/polyfill
+- dayjs
 
 ---
 
@@ -37,12 +37,14 @@ Create `.env` in project root:
     DEFAULT_WIDTH=1179
 
     PERSON_NAME_1=Person1
-    PERSON_BIRTHDAY_1=2026-03-01
+    PERSON_BIRTHDAY_1=01/03/2569
 
     PERSON_NAME_2=Person2
-    PERSON_BIRTHDAY_2=2026-03-01
+    PERSON_BIRTHDAY_2=01/03/2569
 
-    ANNIVERSARY=2026-03-01
+    ANNIVERSARY=01/03/2569
+
+Dates use `DD/MM/YYYY` with a Buddhist-era year, so `01/03/2569` is 1 March 2026.
 
 ---
 
