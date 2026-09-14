@@ -1,9 +1,6 @@
 import { LocaleConstants, TZConstants } from "../constants/tz";
 
-export const Logs = {
-  log: (...args: any) => log("LOG", ...args),
-};
-
+// timestamp ผูกกับเวลาไทยเสมอ ไม่ขึ้นกับ TZ ของ container
 const formatter = new Intl.DateTimeFormat(LocaleConstants.TH, {
   timeZone: TZConstants.TH,
   year: "numeric",
@@ -15,8 +12,10 @@ const formatter = new Intl.DateTimeFormat(LocaleConstants.TH, {
   hour12: false,
 });
 
-const getDateTime = () => formatter.format(Date.now());
+const log = (type: string, ...args: unknown[]) => {
+  console.log(`${formatter.format(Date.now())} [${type}]`, ...args);
+};
 
-const log = (type: string, ...args: any) => {
-  return console.log(`${getDateTime()} [${type}]`, ...args);
+export const Logs = {
+  log: (...args: unknown[]) => log("LOG", ...args),
 };
