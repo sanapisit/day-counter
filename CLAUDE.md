@@ -18,7 +18,7 @@ bun run start            # build, then run the bundle (dist/index.js)
 bun run build:docker     # multi-arch buildx build + push (day-counter:latest)
 ```
 
-No test suite, linter, or formatter is configured. There is no typecheck script either — use `bunx tsc --noEmit` if you need one (`tsconfig.json` is `strict` + `noUncheckedIndexedAccess`).
+The only test is `src/utils/date.test.ts` (`bun test`); no linter or formatter is configured. There is no typecheck script either — use `bunx tsc --noEmit` if you need one (`tsconfig.json` is `strict` + `noUncheckedIndexedAccess`).
 
 **Asset paths in `src/constants/app.ts` are relative**, so the process must be started with the project root (or `/app` in the container) as CWD, or font/template loading fails.
 
@@ -34,7 +34,7 @@ Bun auto-loads `.env` from the project root; there is no dotenv dependency.
 
 All config is env-driven, parsed and validated once at startup by `loadEnv()` in `src/preload/env.ts`. Invalid values **throw at boot** — there is no runtime fallback beyond the defaults in the destructuring. `.env.example` is incomplete: it omits `NODE_ENV` (`development` | `test` | `production`) and `HOST` (default `0.0.0.0`), both of which are validated.
 
-Validated vars: `NODE_ENV`, `HOST`, `PORT` (1–65535), `FONT_SIZE`, `DEFAULT_HEIGHT`, `DEFAULT_WIDTH` (integers), `PERSON_NAME_{1,2}` (non-blank, ≤ 30 chars), `PERSON_BIRTHDAY_{1,2}` and `ANNIVERSARY`.
+Validated vars: `NODE_ENV`, `HOST`, `PORT` (1–65535), `FONT_SIZE` (1–500), `DEFAULT_WIDTH`/`DEFAULT_HEIGHT` (integers inside the same `AppConstants.MIN_*`–`MAX_*` range as the query, because `warmup()` renders the default size without going through `parseSize`), `PERSON_NAME_{1,2}` (non-blank, ≤ 30 chars), `PERSON_BIRTHDAY_{1,2}` and `ANNIVERSARY`.
 
 **Dates in env are `DD/MM/YYYY` with a Buddhist-era year** — `01/03/2569` means 1 March 2026 CE. `parseEnvDate()` validates them at boot: shape (`RegexConstants.DATE`), that the date actually exists (`31/02/2569` is rejected), and that the year falls in `CalendarConstants.MIN/MAX_BUDDHIST_YEAR` (2400–2700). That last check exists to catch a Gregorian year typed in by mistake — without it `01/03/2026` would silently resolve to 1483 CE. Nothing reaches render time as `"Invalid date"` any more; bad config fails the boot.
 
@@ -114,7 +114,7 @@ The only date dependency is **dayjs** with the `utc` and `customParseFormat` plu
 - **Timezone is a fixed `UTC+7`, not `dayjs.tz()`.** Thailand has used UTC+7 since 1920 and has never observed DST, so `TZConstants.TH_UTC_OFFSET_MINUTES` is correct and `dayjs().utcOffset(420)` is ~54× faster than `dayjs().tz("Asia/Bangkok")`, which rebuilds an `Intl.DateTimeFormat` on every call. `getToday()` runs on every request, so this matters. Do **not** "fix" this by switching to the timezone plugin.
 - `diffYearsMonthsDays` does **not** use `to.diff(from, "month")`. dayjs counts a clamped month as a whole month, which makes every end-of-month base come out one month too high (`1999-03-31 → 2024-02-29` would be `24y11m0d` instead of the correct `24y10m29d`). The rule that works: decide the whole-month count by comparing the target against the **unclamped** anchor, then let `dayjs.add(n, "month")` clamp. Verified equal to the previous `Temporal`-based implementation across 548,160 date pairs (bases 1996–2030 × targets 2024–2028), zero differences in either output line.
 - `parseIsoDate` / `parseEnvDate` use dayjs **strict** parsing, so `2026-02-31` and `29/02/2569` are rejected rather than silently rolled over.
-- `getNextMidnightMs()` is today's UTC-midnight plus one day, minus the fixed offset. It memoises the result and recomputes only once that moment has passed, so both the rollover timer and the per-request `Cache-Control` header can call it freely.
+- `getToday()` and `getNextMidnightMs()` share one memo (`refreshToday()`): plain epoch arithmetic (`Date.now() + offset`, `toISOString()`), no dayjs, recomputed only when `now` leaves today's `[start, nextMidnight)` window. The lower bound matters because the Pi has no RTC and NTP can step the clock backwards. ~0.08µs per call versus ~2.7µs for the old `dayjs().utcOffset().format()`.
 - `nextYearlyOccurrence` relies on `dayjs.year(y)` clamping Feb 29 → Feb 28 in non-leap years while returning Feb 29 in leap ones, so the occurrence is recomputed per candidate year. An earlier `Temporal` version clamped once and *then* added a year, which made the next occurrence after a Feb-29 birthday land on Feb 28 of a leap year — one day early. That bug is fixed; it only ever affected Feb-29 dates.
 
 ## Notable non-obvious behavior
