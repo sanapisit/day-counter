@@ -92,18 +92,32 @@ export const nextYearlyOccurrence = (
 // ---------------------------------------------------------------------------
 // เวลาปัจจุบันตามเวลาไทย
 // ---------------------------------------------------------------------------
-// hot path: ถูกเรียกทุก request จึงใช้ utcOffset() แทน tz() (เร็วกว่า ~54 เท่า)
-export const getToday = (): string =>
-  dayjs().utcOffset(TZConstants.TH_UTC_OFFSET_MINUTES).format(ISO_FORMAT);
+// hot path: ถูกเรียกทุก request — คิด "วันนี้" แค่วันละครั้งด้วยเลขล้วน ไม่ผ่าน
+// dayjs (epoch ms ไม่มี leap second และไทยไม่มี DST จึงหารด้วย DAY_MS ได้ตรงๆ)
+const DAY_MS = 86_400_000;
 
-// เที่ยงคืนไทยถัดไปเป็น epoch ms — คิดใหม่แค่วันละครั้งแล้ว cache ผลไว้
-let cachedMidnightMs = 0;
+let todayStr = "";
+let todayStartMs = 0;
+let nextMidnightMs = 0;
 
+const refreshToday = () => {
+  const now = Date.now();
+  // เช็คขอบล่างด้วย: Pi ไม่มี RTC นาฬิกาอาจถูก NTP ปรับถอยหลังข้ามวันได้
+  if (now >= todayStartMs && now < nextMidnightMs) return;
+
+  const localMs = now + OFFSET_MS;
+  todayStr = new Date(localMs).toISOString().slice(0, 10);
+  todayStartMs = localMs - (localMs % DAY_MS) - OFFSET_MS;
+  nextMidnightMs = todayStartMs + DAY_MS;
+};
+
+export const getToday = (): string => {
+  refreshToday();
+  return todayStr;
+};
+
+// เที่ยงคืนไทยถัดไปเป็น epoch ms
 export const getNextMidnightMs = (): number => {
-  if (Date.now() >= cachedMidnightMs) {
-    const today = dayjs.utc(getToday(), ISO_FORMAT, true);
-    cachedMidnightMs = today.add(1, "day").valueOf() - OFFSET_MS;
-  }
-
-  return cachedMidnightMs;
+  refreshToday();
+  return nextMidnightMs;
 };
