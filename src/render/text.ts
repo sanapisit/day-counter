@@ -14,13 +14,24 @@ type Counter = {
   passed: string;
   // จำนวนวันจนถึงรอบถัดไป เช่น "37d"
   countdownDays: string;
+  countdownColor: string;
 };
+
+// บรรทัดหนึ่งในภาพ: tail (ถ้ามี) วาดต่อท้าย text ด้วย tailColor
+export type Line = { text: string; tail?: string; tailColor?: string };
+
+const TEXT_COLOR = "#fff";
+
+// สีของจำนวนวัน countdown: วันนี้ = เขียว, อีก 1 วัน = เหลือง, อีก 2 วัน = ฟ้า
+const countdownColor = (days: number): string =>
+  ["#4ade80", "#facc15", "#38bdf8"][days] ?? TEXT_COLOR;
 
 // วันที่ทุกตัวถูก validate ตั้งแต่ boot แล้ว (ดู preload/env.ts) ค่านี้จึงเป็น
 // defence in depth ไม่ใช่ path ที่ควรเจอจริง
 const INVALID: Counter = {
   passed: "Invalid date",
   countdownDays: "Invalid date",
+  countdownColor: TEXT_COLOR,
 };
 
 // input เป็นสตริงดิบจาก env (DD/MM/YYYY ปี พ.ศ.) ส่วน today ถูกส่งมาจากผู้เรียก
@@ -39,14 +50,22 @@ const calculate = (input: string, today: PlainDate | null): Counter => {
 
   // ===== 2) Countdown แบบวนรายปี =====
   const nextOccurrence = nextYearlyOccurrence(baseDate, today);
+  const daysLeft = diffDays(today, nextOccurrence);
 
   return {
     passed: `${elapsed.years}y${elapsed.months}m${elapsed.days}d | ${totalDays}d`,
-    countdownDays: `${diffDays(today, nextOccurrence)}d`,
+    countdownDays: `${daysLeft}d`,
+    countdownColor: countdownColor(daysLeft),
   };
 };
 
-const genLines = (todayStr: string): string[] => {
+const countdownLine = (label: string, c: Counter): Line => ({
+  text: `${label} - `,
+  tail: c.countdownDays,
+  tailColor: c.countdownColor,
+});
+
+const genLines = (todayStr: string): Line[] => {
   Logs.log("genText");
 
   const today = parseIsoDate(todayStr);
@@ -58,22 +77,22 @@ const genLines = (todayStr: string): string[] => {
   const anniversary = calculate(Config.ANNIVERSARY, today);
 
   return [
-    `${name1} - ${birthday1.passed}`,
-    `${name2} - ${birthday2.passed}`,
-    `Anniversary - ${anniversary.passed}`,
-    "",
-    "Countdown",
-    `${name1} - ${birthday1.countdownDays}`,
-    `${name2} - ${birthday2.countdownDays}`,
-    `Anniversary - ${anniversary.countdownDays}`,
+    { text: `${name1} - ${birthday1.passed}` },
+    { text: `${name2} - ${birthday2.passed}` },
+    { text: `Anniversary - ${anniversary.passed}` },
+    { text: "" },
+    { text: "Countdown" },
+    countdownLine(name1, birthday1),
+    countdownLine(name2, birthday2),
+    countdownLine("Anniversary", anniversary),
   ];
 };
 
 // ข้อความชุดเดียวใช้ได้กับทุกขนาดภาพของวันนั้น จึง cache แยกจาก canvas
-let cachedLines: string[] = [];
+let cachedLines: Line[] = [];
 let cachedDate: string | null = null;
 
-export const getTextLines = (today: string): string[] => {
+export const getTextLines = (today: string): Line[] => {
   if (cachedDate !== today) {
     cachedDate = today;
     cachedLines = genLines(today);

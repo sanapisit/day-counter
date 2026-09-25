@@ -4,7 +4,7 @@ import { Config } from "../preload";
 import { getTemplate } from "../preload/template";
 import { Logs } from "../utils/log";
 import { drawGlassPanel, type GlassPanel } from "./glass-panel";
-import { getTextLines } from "./text";
+import { getTextLines, type Line } from "./text";
 
 const LINE_HEIGHT_RATIO = 1.2;
 
@@ -65,7 +65,7 @@ const layoutPanel = (
 // กระจกทั้งอันหลายเท่า และกรอบกระจกให้ contrast พอสำหรับอ่านออกอยู่แล้ว
 const drawTextLines = (
   ctx: SKRSContext2D,
-  lines: string[],
+  lines: Line[],
   panel: GlassPanel,
   h: number,
   fontSize: number,
@@ -73,14 +73,19 @@ const drawTextLines = (
 ) => {
   const marginX = fontSize * 0.5; // ระยะห่างระหว่างข้อความกับขอบกรอบ
 
-  ctx.fillStyle = "#fff";
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
 
   // เริ่มวาดจากกึ่งกลาง — ยักไปขวาเพื่อให้ออกห่างขอบกรอบ
   let y = h / 2 - (lines.length * lineHeight) / 2 + lineHeight / 2;
-  for (const line of lines) {
-    ctx.fillText(line, panel.x + marginX, y);
+  const x = panel.x + marginX;
+  for (const { text, tail, tailColor } of lines) {
+    ctx.fillStyle = "#fff";
+    ctx.fillText(text, x, y);
+    if (tail) {
+      ctx.fillStyle = tailColor ?? "#fff";
+      ctx.fillText(tail, x + ctx.measureText(text).width, y);
+    }
     y += lineHeight;
   }
 };
@@ -107,7 +112,7 @@ export const renderImage = async (
   const lineHeight = fontSize * LINE_HEIGHT_RATIO;
   const textHeight = lines.length * lineHeight;
   const textWidth = Math.max(
-    ...lines.map((line) => ctx.measureText(line).width),
+    ...lines.map(({ text, tail }) => ctx.measureText(text + (tail ?? "")).width),
   );
 
   const panel = layoutPanel(w, h, fontSize, textWidth, textHeight);
