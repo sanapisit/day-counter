@@ -79,7 +79,7 @@ So font registration and the watcher happen **before** env validation — a bad 
 
 `src/services/day-counter.ts` is only the HTTP edge:
 
-- `parseSize` reads `width`/`height` (falling back to `Config.DEFAULT_WIDTH/HEIGHT`) and rejects anything outside `AppConstants.MIN_*`/`MAX_*` (1500 × 3000) with a **400 "Unsupported size"** — non-numeric input becomes `NaN` and lands here too.
+- `parseSize` reads `width`/`height` (falling back to `Config.DEFAULT_WIDTH/HEIGHT`) and requires **integers** inside `AppConstants.MIN_*`–`MAX_*` (1–1500 × 1–3000), answering a **400 "Unsupported size"** otherwise — non-numeric input becomes `NaN` and fractional input fails `Number.isInteger`, so both land here. The floor really is `1`, so `?width=1&height=1` is a legal request that renders.
 - `withTimeout(getImage(size), RENDER_TIMEOUT_MS, …)` bounds the wait. A timeout rejects out of the handler and surfaces as the generic 500; it does **not** cancel the render, and the entry stays cached so the next request picks up the finished result.
 - `imageHeaders()` sets the WebP content type and the midnight-clamped `Cache-Control`.
 
@@ -103,8 +103,8 @@ A full 1179 × 2556 render is ~390ms on a dev desktop, of which `canvas.encode("
 - `warmup()` (exported from `image-cache.ts`, called from `index.ts`) subscribes to template reloads, loads the template, renders `DEFAULT_WIDTH × DEFAULT_HEIGHT`, then arms the rollover timer.
 - `hotSizes` remembers every `w × h` ever requested (same FIFO cap as the image cache) and **survives the date rollover**, which `cachedImages` does not. It is what pre-warming iterates over.
 - A timer fires at the next Bangkok midnight + `ROLLOVER_GRACE_MS` and re-renders every hot size **sequentially in the background**, then re-arms itself. Re-arming happens *before* the warm so a failed render can't break the chain. The timer is `unref()`'d so it never blocks shutdown.
-- `clearCache()` also schedules a debounced background warm (`WARM_DEBOUNCE_MS`), so a template edit doesn't push the re-render onto the next visitor.
-- Every render goes through the `createSemaphore(MAX_CONCURRENT_RENDERS)` slot. Requests for the *same* size still share one promise; the semaphore only bounds *distinct* sizes, which is what would otherwise blow the 2-CPU / 256m container budget.
+- `clearCache()` also schedules a debounced background warm (`WARM_DEBOUNCE_MS`), so a template edit doesn't push the re-render onto the next visitor. Keep `WARM_DEBOUNCE_MS` (500 ms) **larger than** `TEMPLATE_RELOAD_DEBOUNCE_MS` (200 ms): if the warm fires between two reload events, the image it just produced is cleared again and the render was free work.
+- Every render goes through the `createSemaphore(MAX_CONCURRENT_RENDERS)` (2) slot. Requests for the *same* size still share one promise; the semaphore only bounds *distinct* sizes, which is what would otherwise blow the 2-CPU / 256m container budget.
 - The shared timer/concurrency primitives live in `src/utils/async.ts`: `createSemaphore`, `createDebouncedTask` (always `unref()`s its timer; used by both the watcher and the warm scheduler) and `withTimeout`.
 
 ### Date math lives in `src/utils/date.ts` (dayjs)
@@ -125,5 +125,14 @@ The only date dependency is **dayjs** with the `utc` and `customParseFormat` plu
 - Timezone is hardcoded to `Asia/Bangkok` (`TZConstants.TH`) for all date logic and log timestamps, independent of the container's `TZ`.
 - Comments are mixed Thai/English throughout `services/` and `render/`; that is existing convention, not an error.
 - `docker-compose.yaml` mounts `./template:/app/assets/images:ro`, so the container picks up template edits without a restart via the `fs.watch` reload path. That `./template` directory is **not** in the repo — create it and drop a `template.png` in before running compose.
+- `docker-compose.yaml` passes only the person/anniversary vars, so `FONT_SIZE` and `DEFAULT_WIDTH`/`DEFAULT_HEIGHT` fall through to the defaults in `loadEnv()`'s destructuring (48 / 1179 / 2556) — the container never reads the project `.env`. Its sample values also set `PERSON_NAME_2=Person1`, a copy-paste slip rather than intended behaviour.
+- `Logs.log` forwards straight to `console.log`, so format specifiers work (`Logs.log("Template changed: %s", event)`), and every timestamp is rendered `th-TH` in `Asia/Bangkok`.
 - The Dockerfile runs as the non-root `bun` user, sets `TZ=Asia/Bangkok`, and has a `HEALTHCHECK` hitting `/health`. It installs from `bun.lock` with `--frozen-lockfile`; the stray `package-lock.json` is unused.
 - `CLAUDE.md` is tracked in git (committed in `7afcf69`), so edits to it are part of the repo and get committed like any other file.
+
+## Conventions
+
+- Commits are **Conventional Commits with a scope**, subject only, no body: `refactor(day-counter): split the service into cache and render modules`, `fix(template): debounce fs.watch to coalesce duplicate reloads`, `chore(constants): drop unused ENV_DATE_FORMAT`. A breaking change gets `!` (`feat(day-counter)!: pre-warm the new day and move dates to dayjs`). Doc-only changes are bare `docs:`.
+- Tuning/config constants go to `src/constants/*.ts` as a single `as const` object named `<Area>Constants`, with the *reason* for the value in a comment (that is where the Pi budget, the WebP-quality measurement and the Buddhist-year range are recorded). **Drawing styles are the exception**: colours and layout ratios in `src/render/` are still inline or module-local — the text colour is a literal `"#fff"` in `drawTextLines` (`render/canvas.ts`), the panel tint/sheen/border `rgba(...)` values are in `glass-panel.ts`, and `LINE_HEIGHT_RATIO` is a module const in `canvas.ts`.
+- `src/utils/log.ts` is the only logging path; there is no log level beyond `Logs.log`.
+- The repo has no linter or formatter, so match the surrounding style by hand: arrow-function consts, named exports, no default exports, 2-space indent.
