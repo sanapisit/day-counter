@@ -1,3 +1,4 @@
+import { AppConstants } from "../constants/app";
 import { parseEnvDate } from "../utils/date";
 
 export enum NodeEnv {
@@ -23,6 +24,7 @@ export type Env = {
 };
 
 const MAX_NAME_LENGTH = 30;
+const MAX_FONT_SIZE = 500;
 
 // DD/MM/YYYY ปี พ.ศ. — parseEnvDate เช็คทั้งรูปแบบ, ความมีอยู่จริงของวันที่
 // (31/02/2569 ไม่ผ่าน) และช่วงปี พ.ศ. ที่สมเหตุสมผล จึงดักได้ตั้งแต่ตอน boot
@@ -32,18 +34,18 @@ const DATE_HINT = "expected DD/MM/YYYY in Buddhist year, e.g. 01/03/2569";
 const invalid = (name: string, hint?: string) =>
   new Error(hint ? `Invalid ${name} (${hint})` : `Invalid ${name}`);
 
-const requireInteger = (name: string, value: string): number => {
+const requireInteger = (
+  name: string,
+  value: string,
+  min: number,
+  max: number,
+): number => {
   const parsed = Number(value);
-  if (!Number.isInteger(parsed)) throw invalid(name);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw invalid(name, `expected an integer in ${min}-${max}`);
+  }
 
   return parsed;
-};
-
-const requirePort = (name: string, value: string): number => {
-  const port = requireInteger(name, value);
-  if (port <= 0 || port > 65535) throw invalid(name);
-
-  return port;
 };
 
 const requireName = (name: string, value: string): string => {
@@ -84,11 +86,22 @@ export const loadEnv = (): Env => {
   return {
     NODE_ENV: nodeEnv,
     HOST,
-    PORT: requirePort("PORT", PORT),
+    PORT: requireInteger("PORT", PORT, 1, 65535),
 
-    FONT_SIZE: requireInteger("FONT_SIZE", FONT_SIZE),
-    DEFAULT_HEIGHT: requireInteger("DEFAULT_HEIGHT", DEFAULT_HEIGHT),
-    DEFAULT_WIDTH: requireInteger("DEFAULT_WIDTH", DEFAULT_WIDTH),
+    FONT_SIZE: requireInteger("FONT_SIZE", FONT_SIZE, 1, MAX_FONT_SIZE),
+    // warmup() render ขนาด default ตรงๆ โดยไม่ผ่าน parseSize จึงต้องดักตรงนี้
+    DEFAULT_HEIGHT: requireInteger(
+      "DEFAULT_HEIGHT",
+      DEFAULT_HEIGHT,
+      AppConstants.MIN_HEIGHT,
+      AppConstants.MAX_HEIGHT,
+    ),
+    DEFAULT_WIDTH: requireInteger(
+      "DEFAULT_WIDTH",
+      DEFAULT_WIDTH,
+      AppConstants.MIN_WIDTH,
+      AppConstants.MAX_WIDTH,
+    ),
 
     PERSON_NAME_1: requireName("PERSON_NAME_1", PERSON_NAME_1),
     PERSON_BIRTHDAY_1: requireDate("PERSON_BIRTHDAY_1", PERSON_BIRTHDAY_1),
