@@ -47,10 +47,14 @@ const drawBackdrop = (
 
   if (cropWidth <= 0 || cropHeight <= 0) return;
 
-  // Reuse pooled canvas — resize if needed
+  // Reuse pooled canvas — resize if needed (resizing also clears it). Same size
+  // must be cleared by hand: blur fades to transparent at the crop edges, so the
+  // previous render would show through there.
   if (blurCanvas.width !== cropWidth || blurCanvas.height !== cropHeight) {
     blurCanvas.width = cropWidth;
     blurCanvas.height = cropHeight;
+  } else {
+    blurCtx.clearRect(0, 0, cropWidth, cropHeight);
   }
 
   blurCtx.filter = `blur(${blurRadius}px)`;
