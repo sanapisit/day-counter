@@ -17,10 +17,10 @@ type Counter = {
   countdownColor: string;
 };
 
-// บรรทัดหนึ่งในภาพ: tail (ถ้ามี) วาดต่อท้าย text ด้วย tailColor
-export type Line = { text: string; tail?: string; tailColor?: string };
+// บรรทัดหนึ่งในภาพ: tail (ถ้ามี) วาดต่อท้าย text ด้วยสีของมันเอง
+export type Line = { text: string; tail?: { text: string; color: string } };
 
-const TEXT_COLOR = "#fff";
+export const TEXT_COLOR = "#fff";
 
 // สีของจำนวนวัน countdown: วันนี้ = เขียว, อีก 1 วัน = เหลือง, อีก 2 วัน = ฟ้า
 const countdownColor = (days: number): string =>
@@ -61,8 +61,7 @@ const calculate = (input: string, today: PlainDate | null): Counter => {
 
 const countdownLine = (label: string, c: Counter): Line => ({
   text: `${label} - `,
-  tail: c.countdownDays,
-  tailColor: c.countdownColor,
+  tail: { text: c.countdownDays, color: c.countdownColor },
 });
 
 const genLines = (todayStr: string): Line[] => {

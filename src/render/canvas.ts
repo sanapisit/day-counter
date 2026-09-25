@@ -4,7 +4,7 @@ import { Config } from "../preload";
 import { getTemplate } from "../preload/template";
 import { Logs } from "../utils/log";
 import { drawGlassPanel, type GlassPanel } from "./glass-panel";
-import { getTextLines, type Line } from "./text";
+import { getTextLines, TEXT_COLOR, type Line } from "./text";
 
 const LINE_HEIGHT_RATIO = 1.2;
 
@@ -79,12 +79,12 @@ const drawTextLines = (
   // เริ่มวาดจากกึ่งกลาง — ยักไปขวาเพื่อให้ออกห่างขอบกรอบ
   let y = h / 2 - (lines.length * lineHeight) / 2 + lineHeight / 2;
   const x = panel.x + marginX;
-  for (const { text, tail, tailColor } of lines) {
-    ctx.fillStyle = "#fff";
+  for (const { text, tail } of lines) {
+    ctx.fillStyle = TEXT_COLOR;
     ctx.fillText(text, x, y);
     if (tail) {
-      ctx.fillStyle = tailColor ?? "#fff";
-      ctx.fillText(tail, x + ctx.measureText(text).width, y);
+      ctx.fillStyle = tail.color;
+      ctx.fillText(tail.text, x + ctx.measureText(text).width, y);
     }
     y += lineHeight;
   }
@@ -112,7 +112,9 @@ export const renderImage = async (
   const lineHeight = fontSize * LINE_HEIGHT_RATIO;
   const textHeight = lines.length * lineHeight;
   const textWidth = Math.max(
-    ...lines.map(({ text, tail }) => ctx.measureText(text + (tail ?? "")).width),
+    ...lines.map(
+      ({ text, tail }) => ctx.measureText(text + (tail?.text ?? "")).width,
+    ),
   );
 
   const panel = layoutPanel(w, h, fontSize, textWidth, textHeight);
