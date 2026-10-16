@@ -1,5 +1,7 @@
+/target
+
+# ของเหลือจากเวอร์ชัน Bun บน main
 dist/
 node_modules/
 
 .env
-
