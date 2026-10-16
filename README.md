@@ -1,35 +1,16 @@
 # Day Counter
 
-Dynamic image generation API (PNG) built with Bun + Express + @napi-rs/canvas.
-Generates an image from a template and renders dynamic text (daycounter) on top.
-
----
-
-## Features
-
-- High-performance Bun runtime
-- PNG image response (`Content-Type: image/png`)
-- Custom width / height via query params
-- Prompt font rendering
-- Text shadow support
-- 10-minute cache headers
-- Docker-ready (multi-stage, production optimized)
-
----
-
-## Tech Stack
-
-- Bun
-- Express 5
-- @napi-rs/canvas (Skia)
-- dayjs
-
----
+Image generation API (WebP) written in Rust: axum + tiny-skia + rustybuzz + libwebp.
+Renders `assets/images/template.png` at the requested size and draws day-counter /
+countdown text inside an iOS-style "liquid glass" panel. Built to run on a
+Raspberry Pi 3B+.
 
 ## Environment Variables
 
-Create `.env` in project root:
+Read from the process environment, falling back to `.env` in the project root:
 
+    NODE_ENV=development   # development | test | production
+    HOST=0.0.0.0
     PORT=3000
 
     FONT_SIZE=48
@@ -45,97 +26,52 @@ Create `.env` in project root:
     ANNIVERSARY=01/03/2569
 
 Dates use `DD/MM/YYYY` with a Buddhist-era year, so `01/03/2569` is 1 March 2026.
-
----
+Invalid values fail the boot.
 
 ## Development
 
-Install dependencies:
-
 ```bash
-bun install
+cargo run
 ```
 
-Run directly (dev mode):
-
 ```bash
-bun src/index.ts
+cargo test
 ```
 
----
+Run from the project root: asset paths are relative.
 
-## Build (Bundle)
+## Build
 
-```bash
-bun run build
-```
-
-Run production bundle:
+Requires the Rust toolchain ([rustup](https://rustup.rs)) and a C compiler (libwebp is compiled from source).
 
 ```bash
-bun dist/index.js
+cargo build --release
 ```
 
----
+The binary is `target/release/day-counter` (`.exe` on Windows). Run it from the project root:
+
+```bash
+./target/release/day-counter
+```
 
 ## API
 
-### GET `/day-counter`
+`GET /day-counter?width=1179&height=2556` → `image/webp`
 
-Query Parameters:
+`width` (1–1500) and `height` (1–3000) are optional integers; anything else is `400 Unsupported size`.
+`Cache-Control: max-age` is capped at 300s and never crosses Bangkok midnight.
 
-param type required description
-
----
-
-height number no image height
-width number no image width
-
-Example:
-
-GET /day-counter?height=2556&width=1179
-
-Response:
-
-- `Content-Type: image/png`
-
----
+`GET /health` → `ok`
 
 ## Docker
 
-Build image:
-
 ```bash
-docker build -t day-counter .
+docker buildx build --platform linux/amd64,linux/arm64 -t day-counter:latest --push .
 ```
 
-Run container:
-
 ```bash
-docker run -p 3000:3000 day-counter
+docker compose up -d
 ```
 
----
-
-## Performance Notes
-
-- Template image loaded from `assets/images/template.png`
-- Font registered once at startup
-- Native canvas kept external (not bundled)
-- Production deps only in runtime stage
-- Non-root container user
-
----
-
-## Security Notes
-
-- Query params validated (numeric only)
-- No dynamic file path usage
-- Production mode enabled
-- Runs as non-root in container
-
----
-
-## License
-
-Private project
+`docker-compose.yaml` mounts `./template` over `assets/images`; drop a `template.png` there.
+The template is polled every second and reloaded without a restart.

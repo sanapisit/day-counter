@@ -4,23 +4,24 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A single-endpoint image generation API built on Bun's native HTTP server (`Bun.serve` — **not** Express, despite what `README.md` says) and `@napi-rs/canvas` (Skia bindings). It renders `assets/images/template.png` at a requested size, overlays day-counter/countdown text inside an iOS-style "liquid glass" panel, and returns a **WebP** image (the README's PNG/Express/10-minute-cache claims are all stale).
+A single-endpoint image generation API in **Rust**: axum (on tokio) for HTTP, tiny-skia for drawing, rustybuzz for text shaping, `image` for decoding the template, and libwebp (`webp` crate) for encoding. It renders `assets/images/template.png` at a requested size, overlays day-counter/countdown text inside an iOS-style "liquid glass" panel, and returns a **WebP** image.
 
-Deployment target is a **Raspberry Pi 3B+ (1GB RAM, shared with the OS)**. This constraint explains most of the non-obvious code: `AppConstants.MAX_CACHED_IMAGES = 8`, the pooled blur canvas, blurring only the panel region instead of the whole image, no `shadowBlur` on `fillText`, and `mem_limit: 256m` in `docker-compose.yaml`. Keep changes memory- and CPU-frugal.
+It is a port of an earlier Bun + `@napi-rs/canvas` (Skia) version; output was checked pixel-by-pixel against it (mean diff ≈ 2.6 / 765 per pixel, all from blur and encoder differences).
+
+Deployment target is a **Raspberry Pi 3B+ (1GB RAM, shared with the OS)**. That explains `MAX_CACHED_IMAGES = 8`, `MAX_CONCURRENT_RENDERS = 2`, blurring only the panel region, no text shadow, and `mem_limit: 256m` in `docker-compose.yaml`. Keep changes memory- and CPU-frugal.
 
 ## Commands
 
 ```bash
-bun install              # install deps
-bun run start:dev        # run from source (src/index.ts)
-bun run build            # bundle to dist/ (minified, @napi-rs/canvas kept external)
-bun run start            # build, then run the bundle (dist/index.js)
-bun run build:docker     # multi-arch buildx build + push (day-counter:latest)
+cargo run                 # dev (debug build, slow renders)
+cargo run --release       # what production runs
+cargo test                # date tests in src/date.rs
+docker buildx build --platform linux/amd64,linux/arm64 -t day-counter:latest --push .
 ```
 
-The only test is `src/utils/date.test.ts` (`bun test`); no linter or formatter is configured. There is no typecheck script either — use `bunx tsc --noEmit` if you need one (`tsconfig.json` is `strict` + `noUncheckedIndexedAccess`).
+No linter/formatter config. `libwebp-sys` compiles libwebp from C, so a C compiler must be available (it is in `rust:*-slim`).
 
-**Asset paths in `src/constants/app.ts` are relative**, so the process must be started with the project root (or `/app` in the container) as CWD, or font/template loading fails.
+**Asset paths in `src/constants.rs` are relative**, so start the process with the project root (or `/app` in the container) as CWD.
 
 Manual smoke test:
 
@@ -28,111 +29,77 @@ Manual smoke test:
 curl -o out.webp "http://localhost:3000/day-counter?width=1179&height=2556"
 ```
 
-Bun auto-loads `.env` from the project root; there is no dotenv dependency.
-
 ## Configuration
 
-All config is env-driven, parsed and validated once at startup by `loadEnv()` in `src/preload/env.ts`. Invalid values **throw at boot** — there is no runtime fallback beyond the defaults in the destructuring. `.env.example` is incomplete: it omits `NODE_ENV` (`development` | `test` | `production`) and `HOST` (default `0.0.0.0`), both of which are validated.
+`env::init()` (`src/env.rs`) reads each var from the process environment, falling back to a project-root `.env` (a tiny built-in parser: `KEY=VALUE`, `#` comments, optional double quotes — process env always wins). Everything is validated once at boot; **invalid values exit the process** with the error on stderr.
 
-Validated vars: `NODE_ENV`, `HOST`, `PORT` (1–65535), `FONT_SIZE` (1–500), `DEFAULT_WIDTH`/`DEFAULT_HEIGHT` (integers inside the same `AppConstants.MIN_*`–`MAX_*` range as the query, because `warmup()` renders the default size without going through `parseSize`), `PERSON_NAME_{1,2}` (non-blank, ≤ 30 chars), `PERSON_BIRTHDAY_{1,2}` and `ANNIVERSARY`.
+Validated vars: `NODE_ENV` (`development` | `test` | `production`, only used in the startup log), `HOST` (default `0.0.0.0`), `PORT` (1–65535), `FONT_SIZE` (1–500), `DEFAULT_WIDTH`/`DEFAULT_HEIGHT` (same `MIN_*`–`MAX_*` range as the query, because `warmup()` renders the default size directly), `PERSON_NAME_{1,2}` (non-blank, ≤ 30 UTF-16 units), `PERSON_BIRTHDAY_{1,2}` and `ANNIVERSARY`.
 
-**Dates in env are `DD/MM/YYYY` with a Buddhist-era year** — `01/03/2569` means 1 March 2026 CE. `parseEnvDate()` validates them at boot: shape (`RegexConstants.DATE`), that the date actually exists (`31/02/2569` is rejected), and that the year falls in `CalendarConstants.MIN/MAX_BUDDHIST_YEAR` (2400–2700). That last check exists to catch a Gregorian year typed in by mistake — without it `01/03/2026` would silently resolve to 1483 CE. Nothing reaches render time as `"Invalid date"` any more; bad config fails the boot.
+Integers use JS `Number()`-like rules via `env::parse_int` (shared with the query parser): `"1179.0"` passes, `"1.5"`, `"abc"`, `""` fail.
+
+**Dates in env are `DD/MM/YYYY` with a Buddhist-era year** — `01/03/2569` is 1 March 2026 CE. `parse_env_date` checks shape, that the date exists (`31/02/2569` rejected) and that the year is within `MIN/MAX_BUDDHIST_YEAR` (2400–2700) to catch a Gregorian year typed by mistake. Dates are stored parsed (`NaiveDate`) in `Env`, so render never re-parses.
 
 ## Architecture
 
 ```
 src/
-  index.ts              server startup, warmup kick-off, signal handling
-  server.ts             Bun.serve + the route table
-  preload.ts            boot: font -> template watcher -> Config
-  preload/              env.ts (validation), font.ts, template.ts (load + fs.watch)
-  services/
-    day-counter.ts      the /day-counter HTTP handler (size parsing, headers, timeout)
-    image-cache.ts      per-day image cache, hot sizes, render semaphore, pre-warm, rollover
-  render/
-    canvas.ts           renderImage(): template cover + panel layout + text + WebP encode
-    glass-panel.ts      the Liquid Glass panel (shadow, blurred backdrop, border)
-    text.ts             the counter lines + the per-day text cache
-  utils/                async.ts (semaphore/debounce/timeout), date.ts (dayjs), log.ts
-  constants/            app.ts, headers.ts, regex.ts, res.ts, tz.ts
+  main.rs       log! macro, boot, axum server + route match, shutdown, `health` subcommand
+  env.rs        Env + validation + .env fallback, global CONFIG (OnceLock)
+  cache.rs      template holder + mtime poll, per-day image cache, hot sizes, semaphore, warm, rollover
+  render.rs     font/template loading, text lines, shaping, glass panel, WebP encode (pure, no state but the font)
+  date.rs       date math (chrono) + Bangkok "now" + tests
+  constants.rs  tuning constants, each with its reason
 ```
 
-Dependencies point one way: `services/` → `render/` → `preload/`. Nothing under `preload/` imports a service, so there is **no import cycle** — but `Config` is still only safe to read inside function bodies in anything `preload.ts` pulls in transitively (reading it at module top level there throws `Cannot access 'Config' before initialization`).
+### Boot order (`main`)
 
-### Boot order
+1. `day-counter health` → one HTTP/1.0 `GET /health` to `127.0.0.1:$PORT`, exit 0/1. This is the Docker `HEALTHCHECK` (the runtime image has no curl).
+2. `load Font` — `assets/fonts/Prompt-Bold.ttf` is read and leaked into a `'static` rustybuzz `Face`.
+3. `load Template` — loaded **eagerly**; a missing or undecodable template fails the boot. The file in the repo is actually a progressive **JPEG** despite the `.png` name, which is why decoding goes through `image::load_from_memory` (png + jpeg features) rather than tiny-skia's PNG loader.
+4. `env::init()`, bind, log `Running in …`.
+5. `cache::warmup()` is spawned **without awaiting**, so `/health` answers immediately.
 
-`src/index.ts` imports `src/preload.ts`, which drives startup. The real order is **not** the order `preload.ts` reads, because imported module bodies evaluate before the importer's own statements:
-
-1. `src/preload/font.ts` — registers `assets/fonts/Prompt-Bold.ttf` with `GlobalFonts` at import time.
-2. `src/preload/template.ts` — installs an `fs.watch` on the template at import time (throws at boot if the file is missing). The image itself loads **lazily** on the first `getTemplate()` call, not at import. A module-level `loading` promise dedupes concurrent loads/reloads, and every successful load notifies the `onTemplateReload` listeners. The watcher is debounced (`TEMPLATE_RELOAD_DEBOUNCE_MS`) because `fs.watch` fires several events per file write.
-3. *Then* `export const Config = loadEnv()` runs in `preload.ts`, validating `process.env` into the typed `Env` object.
-
-So font registration and the watcher happen **before** env validation — a bad `PORT` still logs `load Font` first.
-
-`template.ts` knows nothing about the caches: it only publishes reload events. `image-cache.ts` subscribes (`onTemplateReload(clearCache)`) as the first thing `warmup()` does — so **if `warmup()` is never called, a template edit reloads the image but never invalidates the rendered cache**.
+Shutdown: SIGINT/SIGTERM (Ctrl-C only on Windows) → axum graceful shutdown, capped at `SHUTDOWN_DRAIN` (5s); exits as soon as in-flight requests finish.
 
 ### Request path
 
-`src/index.ts` starts the server, kicks off `warmup()` **without awaiting it** (so `/health` answers immediately), and wires `SIGINT`/`SIGTERM` (guarded against a double signal) to `server.stop(false)` + a `SHUTDOWN_DRAIN_MS` drain window before `process.exit(0)`.
+`main::handle` is the router's only handler (`fallback`), a hand-rolled `match` like the original: `/` (JSON hello), `/health` (`ok`), `/day-counter`, else 404 `Not Found`. Any method is accepted. Every request is logged with its query string; an `Err` from a route is logged and becomes `500 Internal Server Error`.
 
-`src/server.ts` is a hand-rolled `switch` inside `Bun.serve`'s `fetch` (no router, `reusePort: true`): `/` (JSON hello), `/health` (`ok`), `/day-counter` → `dayCounter`, else 404. The whole handler is wrapped in try/catch → 500. Every request is logged unconditionally, query string included.
+`/day-counter`: `parse_size` (missing param → configured default; not an integer in 1–1500 × 1–3000 → **400 "Unsupported size"**; `?width=1&height=1` is legal), then `tokio::time::timeout(RENDER_TIMEOUT, cache::get_image(size))`. A timeout is a 500 but does **not** cancel the render — it runs in its own spawned task and stays cached for the next request. `Cache-Control: public, max-age=min(300, seconds until Bangkok midnight)`, floored at 1.
 
-`src/services/day-counter.ts` is only the HTTP edge:
+### `cache.rs`
 
-- `parseSize` reads `width`/`height` (falling back to `Config.DEFAULT_WIDTH/HEIGHT`) and requires **integers** inside `AppConstants.MIN_*`–`MAX_*` (1–1500 × 1–3000), answering a **400 "Unsupported size"** otherwise — non-numeric input becomes `NaN` and fractional input fails `Number.isInteger`, so both land here. The floor really is `1`, so `?width=1&height=1` is a legal request that renders.
-- `withTimeout(getImage(size), RENDER_TIMEOUT_MS, …)` bounds the wait. A timeout rejects out of the handler and surfaces as the generic 500; it does **not** cancel the render, and the entry stays cached so the next request picks up the finished result.
-- `imageHeaders()` sets the WebP content type and the midnight-clamped `Cache-Control`.
+- `STATE` (one `std::sync::Mutex`): today's date, `images: Vec<(size, Shared future)>` and `hot: Vec<size>`. Both are FIFO-capped at `MAX_CACHED_IMAGES` with linear scans (8 entries).
+- `get_image` clears `images` when the Bangkok date changes, records the size in `hot` (even on a hit), and returns the cached `Shared` future or inserts a new one **synchronously under the lock**, so concurrent requests for one size share a single render. The render is `tokio::spawn` → acquire `RENDER_SLOTS` (`Semaphore`, 2) → `spawn_blocking(render::render)`. A failed render removes its key.
+- `hot` survives the date rollover; it is what pre-warming iterates over. `warm_hot_sizes` renders them **sequentially**, guarded by an `AtomicBool` so only one warm runs at a time.
+- `spawn_rollover` sleeps until the next Bangkok midnight + `ROLLOVER_GRACE_MS`, then warms; it loops, recomputing the delay from the wall clock each time.
+- `spawn_template_watch` **polls** the template's `(mtime, len)` every `TEMPLATE_POLL_INTERVAL` (1s) instead of using inotify: it works through docker bind mounts and rename-over writes, and fires once per change, so there is no debounce. On change it reloads on a blocking thread; success → `clear_cache()` (drops in-flight entries too) → background warm. A half-written file just fails to decode, logs `Template reload failed`, and is picked up on the next mtime change.
 
-`src/services/image-cache.ts` owns everything stateful. **Two caches, both keyed on today's date in `Asia/Bangkok`** and cleared when the date rolls over:
+### `render.rs`
 
-- `cachedImages: Map<string, Promise<Buffer>>` keyed `"${w}x${h}"`. It stores the **promise** synchronously so concurrent requests for one size share a single render; a rejected render deletes its own key. Insertion-order (FIFO, not LRU) eviction once `MAX_CACHED_IMAGES` is reached.
-- `cachedLines` in `render/text.ts` — the generated lines, shared across all sizes for a given day.
+- `render(w, h, today, cfg, template)` draws the template **cover**-style (bilinear, scaled to fill, overflow cropped), builds the 8 text lines, measures them, lays out the panel, draws panel + text, then `take_demultiplied()` → `webp::Encoder::from_rgba(..).encode(85)`.
+- Text is shaped with rustybuzz (needed for Thai mark stacking), glyph outlines go straight into a tiny-skia `PathBuilder`, one fill per line segment. `textBaseline = "middle"` is reproduced as baseline = y + (ascender + descender) / 2 × scale, which is what Skia does.
+- Glass panel: blur of **only the crop under the panel** (+ 2× radius bleed) via `image::imageops::fast_blur` (σ = round(radius), matching CSS `blur()`), clipped by a rounded-rect `Mask`, then a milky tint, a top sheen gradient and a hairline gradient border. The original's drop shadow is intentionally **not** ported: it used `shadowBlur` on a fill with alpha 0.01, and Skia multiplies shadow alpha by fill alpha, so it was invisible.
+- `FONT_SIZE` is absolute; the panel is sized from the measured text (`x = w / 10`, vertically centred, clamped to the canvas) but text is **neither wrapped nor truncated**.
 
-`src/render/` is pure drawing, no caching:
+### `date.rs`
 
-- `renderImage(w, h, today)` draws the template **cover**-style (scaled to fill, overflow cropped), lays out the panel from the measured text, then draws the panel and the lines, and encodes WebP at `WEBP_QUALITY`.
-- `drawGlassPanel` fakes iOS Liquid Glass: soft drop shadow, a blur of **only the cropped background region under the panel** (plus a bleed margin) rendered through the pooled module-level `blurCanvas`, then a milky tint, a top sheen gradient, and a hairline border. Text is drawn left-aligned with no shadow because the panel already provides contrast.
-- `calculate(input, today)` in `text.ts` does the date math via `src/utils/date.ts`: elapsed time (`{y}y{m}m{d}d | {total}d`) plus days until the next yearly occurrence. `input` is the raw env string (`DD/MM/YYYY`, Buddhist year); it is already validated at boot, so the `"Invalid date"` fallback is defence in depth rather than a path you should hit. `today` is parsed once per day and threaded in so all lines in one image agree on the date.
-
-Constants are split by concern under `src/constants/`: `app.ts` (asset paths, font name, `QUERY_WIDTH`/`QUERY_HEIGHT`, size limits, cache cap, encode quality, render/rollover/shutdown tuning), `headers.ts`, `regex.ts`, `res.ts`, `tz.ts` (timezone + the fixed UTC+7 offset, locale, and `CalendarConstants` for the Buddhist-era year range).
-
-### Keeping renders off the request path
-
-A full 1179 × 2556 render is ~390ms on a dev desktop, of which `canvas.encode("webp", 85)` alone is ~150–180ms (lowering quality barely helps — q50 only saves ~13%). On the Pi that is seconds, so nothing that can be precomputed should happen while a request waits:
-
-- `warmup()` (exported from `image-cache.ts`, called from `index.ts`) subscribes to template reloads, loads the template, renders `DEFAULT_WIDTH × DEFAULT_HEIGHT`, then arms the rollover timer.
-- `hotSizes` remembers every `w × h` ever requested (same FIFO cap as the image cache) and **survives the date rollover**, which `cachedImages` does not. It is what pre-warming iterates over.
-- A timer fires at the next Bangkok midnight + `ROLLOVER_GRACE_MS` and re-renders every hot size **sequentially in the background**, then re-arms itself. Re-arming happens *before* the warm so a failed render can't break the chain. The timer is `unref()`'d so it never blocks shutdown.
-- `clearCache()` also schedules a debounced background warm (`WARM_DEBOUNCE_MS`), so a template edit doesn't push the re-render onto the next visitor. Keep `WARM_DEBOUNCE_MS` (500 ms) **larger than** `TEMPLATE_RELOAD_DEBOUNCE_MS` (200 ms): if the warm fires between two reload events, the image it just produced is cleared again and the render was free work.
-- Every render goes through the `createSemaphore(MAX_CONCURRENT_RENDERS)` (2) slot. Requests for the *same* size still share one promise; the semaphore only bounds *distinct* sizes, which is what would otherwise blow the 2-CPU / 256m container budget.
-- The shared timer/concurrency primitives live in `src/utils/async.ts`: `createSemaphore`, `createDebouncedTask` (always `unref()`s its timer; used by both the watcher and the warm scheduler) and `withTimeout`.
-
-### Date math lives in `src/utils/date.ts` (dayjs)
-
-The only date dependency is **dayjs** with the `utc` and `customParseFormat` plugins (~12 KB bundled; the bundle is ~23 KB total). Every calendar date in the system is a **UTC-midnight `Dayjs`**, so day diffs are always whole days with no time component to round.
-
-- **Timezone is a fixed `UTC+7`, not `dayjs.tz()`.** Thailand has used UTC+7 since 1920 and has never observed DST, so `TZConstants.TH_UTC_OFFSET_MINUTES` is correct and `dayjs().utcOffset(420)` is ~54× faster than `dayjs().tz("Asia/Bangkok")`, which rebuilds an `Intl.DateTimeFormat` on every call. `getToday()` runs on every request, so this matters. Do **not** "fix" this by switching to the timezone plugin.
-- `diffYearsMonthsDays` does **not** use `to.diff(from, "month")`. dayjs counts a clamped month as a whole month, which makes every end-of-month base come out one month too high (`1999-03-31 → 2024-02-29` would be `24y11m0d` instead of the correct `24y10m29d`). The rule that works: decide the whole-month count by comparing the target against the **unclamped** anchor, then let `dayjs.add(n, "month")` clamp. Verified equal to the previous `Temporal`-based implementation across 548,160 date pairs (bases 1996–2030 × targets 2024–2028), zero differences in either output line.
-- `parseIsoDate` / `parseEnvDate` use dayjs **strict** parsing, so `2026-02-31` and `29/02/2569` are rejected rather than silently rolled over.
-- `getToday()` and `getNextMidnightMs()` share one memo (`refreshToday()`): plain epoch arithmetic (`Date.now() + offset`, `toISOString()`), no dayjs, recomputed only when `now` leaves today's `[start, nextMidnight)` window. The lower bound matters because the Pi has no RTC and NTP can step the clock backwards. ~0.08µs per call versus ~2.7µs for the old `dayjs().utcOffset().format()`.
-- `nextYearlyOccurrence` relies on `dayjs.year(y)` clamping Feb 29 → Feb 28 in non-leap years while returning Feb 29 in leap ones, so the occurrence is recomputed per candidate year. An earlier `Temporal` version clamped once and *then* added a year, which made the next occurrence after a Feb-29 birthday land on Feb 28 of a leap year — one day early. That bug is fixed; it only ever affected Feb-29 dates.
+- Calendar dates are `chrono::NaiveDate`. "Now in Bangkok" is plain epoch arithmetic with the fixed `TH_UTC_OFFSET_MS` — Thailand has been UTC+7 with no DST since 1920, so no tz database is needed. It is cheap enough to compute on every call; there is no memo, and a clock stepped backwards (the Pi has no RTC) is handled naturally.
+- `diff_years_months_days`: whole months = calendar-month difference, minus one if `to.day() < from.day()`; then `from + Months(n)` (chrono clamps end-of-month) and the remaining days. `1999-03-31 → 2024-02-29` is `24y10m29d`, not `24y11m0d`.
+- `next_yearly_occurrence` moves the base into this/next year with Feb 29 → Feb 28 clamping per candidate year, so a Feb-29 birthday lands on Feb 29 in leap years.
+- Verified identical to the previous dayjs implementation over 534,726 (base, target) pairs (bases 1996–1999 daily × targets 2024–2028 every 5th day), both output lines.
 
 ## Notable non-obvious behavior
 
-- `clearCache()` drops **in-flight** entries too, so any render racing a template reload is thrown away. `warmup()` deliberately awaits `getTemplate()` *before* rendering anything, because otherwise the lazy first template load wipes the first request's own in-flight entry and it has to render twice.
-- `Cache-Control` on `/day-counter` is `max-age=min(IMAGE_MAX_AGE_SECONDS, seconds until Bangkok midnight)`, so a client cache can never span the day boundary and show yesterday's counts. It shrinks to single digits just before midnight.
-- `FONT_SIZE` is absolute and independent of the requested `width`/`height`. The panel is sized from the measured text (`panel.x = w / 10`, vertically centred) and clamped to the canvas, but the text itself is **neither wrapped nor truncated** — long names or small requested sizes overflow the panel.
-- Timezone is hardcoded to `Asia/Bangkok` (`TZConstants.TH`) for all date logic and log timestamps, independent of the container's `TZ`.
-- Comments are mixed Thai/English throughout `services/` and `render/`; that is existing convention, not an error.
-- `docker-compose.yaml` mounts `./template:/app/assets/images:ro`, so the container picks up template edits without a restart via the `fs.watch` reload path. That `./template` directory is **not** in the repo — create it and drop a `template.png` in before running compose.
-- `docker-compose.yaml` passes only the person/anniversary vars, so `FONT_SIZE` and `DEFAULT_WIDTH`/`DEFAULT_HEIGHT` fall through to the defaults in `loadEnv()`'s destructuring (48 / 1179 / 2556) — the container never reads the project `.env`. Its sample values also set `PERSON_NAME_2=Person1`, a copy-paste slip rather than intended behaviour.
-- `Logs.log` forwards straight to `console.log`, so format specifiers work (`Logs.log("Template changed: %s", event)`), and every timestamp is rendered `th-TH` in `Asia/Bangkok`.
-- The Dockerfile runs as the non-root `bun` user, sets `TZ=Asia/Bangkok`, and has a `HEALTHCHECK` hitting `/health`. It installs from `bun.lock` with `--frozen-lockfile`; the stray `package-lock.json` is unused.
-- `CLAUDE.md` is tracked in git (committed in `7afcf69`), so edits to it are part of the repo and get committed like any other file.
+- `docker-compose.yaml` mounts `./template:/app/assets/images:ro`; that directory is **not** in the repo — create it with a `template.png` before `docker compose up`.
+- Compose passes only the person/anniversary vars, so `FONT_SIZE` and `DEFAULT_*` use the defaults (48 / 1179 / 2556). Its `PERSON_NAME_2=Person1` is a copy-paste slip.
+- The runtime image is `debian:bookworm-slim`, runs as uid 65534 (`nobody`), binary at `/usr/local/bin/day-counter`, assets at `/app/assets`. A multi-arch buildx build compiles the arm64 binary under QEMU, which is slow.
+- Log lines are `DD/MM/<Buddhist year> HH:MM:SS [LOG] …` in Bangkok time regardless of the container `TZ`, via the `log!` macro in `main.rs` (the only logging path).
+- Comments are mixed Thai/English; that is existing convention.
+- `CLAUDE.md` is tracked in git; edits to it are committed like any other file.
 
 ## Conventions
 
-- Commits are **Conventional Commits with a scope**, subject only, no body: `refactor(day-counter): split the service into cache and render modules`, `fix(template): debounce fs.watch to coalesce duplicate reloads`, `chore(constants): drop unused ENV_DATE_FORMAT`. A breaking change gets `!` (`feat(day-counter)!: pre-warm the new day and move dates to dayjs`). Doc-only changes are bare `docs:`.
-- Tuning/config constants go to `src/constants/*.ts` as a single `as const` object named `<Area>Constants`, with the *reason* for the value in a comment (that is where the Pi budget, the WebP-quality measurement and the Buddhist-year range are recorded). **Drawing styles are the exception**: colours and layout ratios in `src/render/` are still inline or module-local — the text colour is a literal `"#fff"` in `drawTextLines` (`render/canvas.ts`), the panel tint/sheen/border `rgba(...)` values are in `glass-panel.ts`, and `LINE_HEIGHT_RATIO` is a module const in `canvas.ts`.
-- `src/utils/log.ts` is the only logging path; there is no log level beyond `Logs.log`.
-- The repo has no linter or formatter, so match the surrounding style by hand: arrow-function consts, named exports, no default exports, 2-space indent.
+- Commits are **Conventional Commits with a scope**, subject only, no body: `refactor(day-counter): …`, `fix(template): …`, `chore(constants): …`. Breaking change gets `!`. Doc-only changes are bare `docs:`.
+- Tuning constants live in `src/constants.rs` as plain `pub const`s with the *reason* in a comment. **Drawing styles are the exception**: colours and layout ratios stay inline in `render.rs` (`TEXT_COLOR`, the countdown colours, the panel `white(alpha)` values, `LINE_HEIGHT_RATIO`).
+- Few files, free functions, module-level statics for the little global state there is (`CONFIG`, `FACE`, `STATE`, `TEMPLATE`, `RENDER_SLOTS`).
