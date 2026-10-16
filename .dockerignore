@@ -1,8 +1,7 @@
 .git/
 .git*
 
-dist/
-node_modules/
+target/
 
 .env*
 docker-compose.yaml
